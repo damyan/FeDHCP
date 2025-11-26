@@ -94,7 +94,7 @@ func parseConfig(args ...string) (*url.URL, *url.URL, error) {
 		return nil, nil, fmt.Errorf("invalid ipxe url: %v", err)
 	}
 
-	if tftp.Scheme != "tftp" || tftp.Host == "" || tftp.Path == "" || tftp.Path[0] != '/' || tftp.Path[1:] == "" {
+	if (tftp.Scheme != "tftp" && tftp.Scheme != "http") || tftp.Host == "" || tftp.Path == "" || tftp.Path[0] != '/' || tftp.Path[1:] == "" {
 		return nil, nil, fmt.Errorf("malformed TFTP parameter, should be a valid URL")
 	}
 
