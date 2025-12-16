@@ -82,14 +82,18 @@ func (k K8sClient) createIpamIP(ctx context.Context, ipaddr net.IP, mac net.Hard
 		log.Debugf("Selecting subnet %s", client.ObjectKeyFromObject(subnet))
 		subnetMatch = true
 
+		log.Debugf("Before prepareCreateIpamIP, %v, %v, %v, %v", ctx, subnetName, macKey, ipaddr)
 		ipamIP, err = k.prepareCreateIpamIP(ctx, subnetName, macKey, ipaddr)
+		log.Debugf("After prepareCreateIpamIP, %v+, %v+", ipamIP, err)
 		if err != nil {
 			return err
 		}
 		if ipamIP == nil {
+			log.Debugf("Before doCreateIpamIP, %v, %v, %v, %v", ctx, subnetName, macKey, ipaddr)
 			if err = k.doCreateIpamIP(ctx, subnetName, macKey, ipaddr); err != nil {
 				return err
 			}
+			log.Debugf("After doCreateIpamIP, %v, %v, %v, %v", ctx, subnetName, macKey, ipaddr)
 		} else {
 			log.Debugf("Reserved IP %s (%s) already exists in subnet %s", ipamIP.Status.Reserved.String(),
 				client.ObjectKeyFromObject(ipamIP), ipamIP.Spec.Subnet.Name)
