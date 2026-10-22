@@ -6,22 +6,15 @@ package metal
 import (
 	"net"
 	"os"
+	"path/filepath"
 	"time"
 
-	"github.com/insomniacslk/dhcp/iana"
+	"github.com/insomniacslk/dhcp/dhcpv6"
 	"github.com/ironcore-dev/fedhcp/internal/api"
-
 	"gopkg.in/yaml.v2"
 
-	"github.com/insomniacslk/dhcp/dhcpv4"
-	"github.com/insomniacslk/dhcp/dhcpv6"
-	metalv1alpha1 "github.com/ironcore-dev/metal-operator/api/v1alpha1"
-	"github.com/mdlayher/netx/eui64"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	. "sigs.k8s.io/controller-runtime/pkg/envtest/komega"
 )
 
 func dhcpv6ResponseWithIANA(ipv6Addr net.IP) *dhcpv6.Message {
@@ -40,7 +33,17 @@ func dhcpv6ResponseWithIANA(ipv6Addr net.IP) *dhcpv6.Message {
 	return stub
 }
 
-var _ = Describe("Endpoint", func() {
+// writeRawConfig marshals a metal config as-is (without filling in the MAC
+// database) and returns its path.
+func writeRawConfig(data api.MetalConfig) string {
+	configData, err := yaml.Marshal(data)
+	Expect(err).NotTo(HaveOccurred())
+	path := filepath.Join(GinkgoT().TempDir(), inventoryConfigFile)
+	Expect(os.WriteFile(path, configData, 0644)).To(Succeed())
+	return path
+}
+
+var _ = Describe("Metal Plugin config", func() {
 	_ = SetupTest()
 
 	It("Setup6 should return error if less arguments are provided", func() {
@@ -74,551 +77,73 @@ var _ = Describe("Endpoint", func() {
 	})
 
 	It("Setup6 should return error if config file is invalid", func() {
-		file, err := os.CreateTemp(GinkgoT().TempDir(), inventoryConfigFile)
-		Expect(err).NotTo(HaveOccurred())
-		defer func() {
-			_ = file.Close()
-		}()
-		Expect(os.WriteFile(file.Name(), []byte("Invalid YAML"), 0644)).To(Succeed())
+		file := filepath.Join(GinkgoT().TempDir(), inventoryConfigFile)
+		Expect(os.WriteFile(file, []byte("Invalid YAML"), 0644)).To(Succeed())
+		_, err := setup6(file)
+		Expect(err).To(HaveOccurred())
+	})
 
-		_, err = setup6(file.Name())
+	It("Setup6 should return error if the MAC database is not configured", func() {
+		_, err := setup6(writeRawConfig(api.MetalConfig{
+			Inventories: []api.Inventory{
+				{Name: machineWithIPAddressName, MacAddress: machineWithIPAddressMACAddress},
+			},
+		}))
+		Expect(err).To(MatchError(ContainSubstring("macDB is required")))
+	})
+
+	It("Setup6 should return error if the MAC database does not exist", func() {
+		_, err := setup6(writeRawConfig(api.MetalConfig{MACDB: "does-not-exist.yaml"}))
 		Expect(err).To(HaveOccurred())
 	})
 
 	It("Setup6 should return a non-nil handler for an empty hosts config", func() {
-		data := api.MetalConfig{
-			Inventories: []api.Inventory{},
-		}
-		configData, err := yaml.Marshal(data)
-		Expect(err).NotTo(HaveOccurred())
-
-		file, err := os.CreateTemp(GinkgoT().TempDir(), inventoryConfigFile)
-		Expect(err).NotTo(HaveOccurred())
-		defer func() {
-			_ = file.Close()
-		}()
-		Expect(os.WriteFile(file.Name(), configData, 0644)).To(Succeed())
-
-		h6, err := setup6(file.Name())
+		h6, err := setup6(writeMetalConfig(api.MetalConfig{Inventories: []api.Inventory{}}))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(h6).NotTo(BeNil())
 	})
 
 	It("Setup4 should return a non-nil handler for an empty hosts config", func() {
-		data := api.MetalConfig{
-			Inventories: []api.Inventory{},
-		}
-		configData, err := yaml.Marshal(data)
-		Expect(err).NotTo(HaveOccurred())
-
-		file, err := os.CreateTemp(GinkgoT().TempDir(), inventoryConfigFile)
-		Expect(err).NotTo(HaveOccurred())
-		defer func() {
-			_ = file.Close()
-		}()
-		Expect(os.WriteFile(file.Name(), configData, 0644)).To(Succeed())
-
-		h4, err := setup4(file.Name())
+		h4, err := setup4(writeMetalConfig(api.MetalConfig{Inventories: []api.Inventory{}}))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(h4).NotTo(BeNil())
 	})
 
 	It("Should return an empty inventory for an empty list", func() {
-		configFile := inventoryConfigFile
-		data := api.MetalConfig{
-			Inventories: []api.Inventory{
-				{},
-			},
-			Filter: api.Filter{
-				MacPrefix: []string{},
-			},
-		}
-		configData, err := yaml.Marshal(data)
-		Expect(err).NotTo(HaveOccurred())
-
-		file, err := os.CreateTemp(GinkgoT().TempDir(), configFile)
-		Expect(err).NotTo(HaveOccurred())
-		defer func() {
-			_ = file.Close()
-		}()
-		Expect(os.WriteFile(file.Name(), configData, 0644)).To(Succeed())
-
-		i, err := loadConfig(file.Name())
+		i, err := loadConfig(writeMetalConfig(api.MetalConfig{
+			Inventories: []api.Inventory{{}},
+			Filter:      api.Filter{MacPrefix: []string{}},
+		}))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(i.Entries).To(BeEmpty())
 	})
 
 	It("Should return a valid inventory list with default name prefix for non-empty MAC address filter", func() {
-		configFile := inventoryConfigFile
-		data := api.MetalConfig{
-			Filter: api.Filter{
-				MacPrefix: []string{
-					"aa:bb:cc:dd:ee:ff",
-				},
-			},
-		}
-		configData, err := yaml.Marshal(data)
-		Expect(err).NotTo(HaveOccurred())
-
-		file, err := os.CreateTemp(GinkgoT().TempDir(), configFile)
-		Expect(err).NotTo(HaveOccurred())
-		defer func() {
-			_ = file.Close()
-		}()
-		Expect(os.WriteFile(file.Name(), configData, 0644)).To(Succeed())
-
-		i, err := loadConfig(file.Name())
+		i, err := loadConfig(writeMetalConfig(api.MetalConfig{
+			Filter: api.Filter{MacPrefix: []string{"aa:bb:cc:dd:ee:ff"}},
+		}))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(i.Entries).To(HaveKey("aa:bb:cc:dd:ee:ff"))
-		pref := i.Entries["aa:bb:cc:dd:ee:ff"]
-		Expect(pref).To(HavePrefix(defaultNamePrefix))
+		Expect(i.Entries["aa:bb:cc:dd:ee:ff"]).To(HavePrefix(defaultNamePrefix))
 	})
 
 	It("Should return an inventory list with custom name prefix for non-empty MAC address filter and set prefix", func() {
-		configFile := inventoryConfigFile
-		data := api.MetalConfig{
+		i, err := loadConfig(writeMetalConfig(api.MetalConfig{
 			NamePrefix: "server-",
-			Filter: api.Filter{
-				MacPrefix: []string{
-					"aa:bb:cc:dd:ee:ff",
-				},
-			},
-		}
-		configData, err := yaml.Marshal(data)
-		Expect(err).NotTo(HaveOccurred())
-
-		file, err := os.CreateTemp(GinkgoT().TempDir(), configFile)
-		Expect(err).NotTo(HaveOccurred())
-		defer func() {
-			_ = file.Close()
-		}()
-		Expect(os.WriteFile(file.Name(), configData, 0644)).To(Succeed())
-
-		i, err := loadConfig(file.Name())
+			Filter:     api.Filter{MacPrefix: []string{"aa:bb:cc:dd:ee:ff"}},
+		}))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(i.Entries).To(HaveKey("aa:bb:cc:dd:ee:ff"))
-		pref := i.Entries["aa:bb:cc:dd:ee:ff"]
-		Expect(pref).To(HavePrefix("server-"))
+		Expect(i.Entries["aa:bb:cc:dd:ee:ff"]).To(HavePrefix("server-"))
 	})
 
 	It("Should return a valid inventory list for a non-empty inventory section, precedence over MAC filter", func() {
-		configFile := inventoryConfigFile
-		data := api.MetalConfig{
-			NamePrefix: "server-",
-			Inventories: []api.Inventory{
-				{
-					Name:       "compute-1",
-					MacAddress: "aa:bb:cc:dd:ee:ff",
-				},
-			},
-			Filter: api.Filter{
-				MacPrefix: []string{
-					"aa:bb:cc:dd:ee:ff",
-				},
-			},
-		}
-		configData, err := yaml.Marshal(data)
-		Expect(err).NotTo(HaveOccurred())
-
-		file, err := os.CreateTemp(GinkgoT().TempDir(), configFile)
-		Expect(err).NotTo(HaveOccurred())
-		defer func() {
-			_ = file.Close()
-		}()
-		Expect(os.WriteFile(file.Name(), configData, 0644)).To(Succeed())
-
-		i, err := loadConfig(file.Name())
+		i, err := loadConfig(writeMetalConfig(api.MetalConfig{
+			NamePrefix:  "server-",
+			Inventories: []api.Inventory{{Name: "compute-1", MacAddress: "aa:bb:cc:dd:ee:ff"}},
+			Filter:      api.Filter{MacPrefix: []string{"aa:bb:cc:dd:ee:ff"}},
+		}))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(i.Entries).To(HaveKeyWithValue("aa:bb:cc:dd:ee:ff", "compute-1"))
 	})
-
-	It("Should create an endpoint for IPv6 DHCP request from a known machine with IP address", func(ctx SpecContext) {
-		mac, _ := net.ParseMAC(machineWithIPAddressMACAddress)
-		ip := net.ParseIP(linkLocalIPV6Prefix)
-		linkLocalIPV6Addr, _ := eui64.ParseMAC(ip, mac)
-
-		req, _ := dhcpv6.NewMessage()
-		req.MessageType = dhcpv6.MessageTypeRequest
-		relayedRequest, _ := dhcpv6.EncapsulateRelay(req, dhcpv6.MessageTypeRelayForward, net.IPv6loopback, linkLocalIPV6Addr)
-
-		stub := dhcpv6ResponseWithIANA(linkLocalIPV6Addr)
-		_, _ = handler6(relayedRequest, stub)
-
-		endpoint := &metalv1alpha1.Endpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: machineWithIPAddressName,
-			},
-		}
-
-		Eventually(Object(endpoint)).Should(SatisfyAll(
-			HaveField("Spec.MACAddress", machineWithIPAddressMACAddress),
-			HaveField("Spec.IP", metalv1alpha1.MustParseIP(linkLocalIPV6Addr.String()))))
-		DeferCleanup(k8sClient.Delete, endpoint)
-	})
-
-	It("Should update an existing endpoint with a stale IP address for IPv6 DHCP request from a known machine", func(ctx SpecContext) {
-		mac, _ := net.ParseMAC(machineWithIPAddressMACAddress)
-		ip := net.ParseIP(linkLocalIPV6Prefix)
-		linkLocalIPV6Addr, _ := eui64.ParseMAC(ip, mac)
-
-		By("Creating an existing endpoint with a stale IP address")
-		staleEndpoint := &metalv1alpha1.Endpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: machineWithIPAddressName,
-			},
-			Spec: metalv1alpha1.EndpointSpec{
-				MACAddress: machineWithIPAddressMACAddress,
-				IP:         metalv1alpha1.MustParseIP("fe80::1"),
-			},
-		}
-		Expect(k8sClient.Create(ctx, staleEndpoint)).To(Succeed())
-		DeferCleanup(k8sClient.Delete, staleEndpoint)
-
-		req, _ := dhcpv6.NewMessage()
-		req.MessageType = dhcpv6.MessageTypeRequest
-		relayedRequest, _ := dhcpv6.EncapsulateRelay(req, dhcpv6.MessageTypeRelayForward, net.IPv6loopback, linkLocalIPV6Addr)
-
-		stub := dhcpv6ResponseWithIANA(linkLocalIPV6Addr)
-		_, _ = handler6(relayedRequest, stub)
-
-		endpoint := &metalv1alpha1.Endpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: machineWithIPAddressName,
-			},
-		}
-
-		By("Ensuring the existing endpoint IP address is updated to the one from the DHCP response")
-		Eventually(Object(endpoint)).Should(SatisfyAll(
-			HaveField("Spec.MACAddress", machineWithIPAddressMACAddress),
-			HaveField("Spec.IP", metalv1alpha1.MustParseIP(linkLocalIPV6Addr.String()))))
-	})
-
-	It("Should create an endpoint for IPv6 DHCP request from a known MAC prefix with IP address", func(ctx SpecContext) {
-		mac, _ := net.ParseMAC(machineWithIPAddressMACAddress)
-		ip := net.ParseIP(linkLocalIPV6Prefix)
-		linkLocalIPV6Addr, _ := eui64.ParseMAC(ip, mac)
-
-		req, _ := dhcpv6.NewMessage()
-		req.MessageType = dhcpv6.MessageTypeRequest
-		relayedRequest, _ := dhcpv6.EncapsulateRelay(req, dhcpv6.MessageTypeRelayForward, net.IPv6loopback, linkLocalIPV6Addr)
-
-		configFile := inventoryConfigFile
-		data := api.MetalConfig{
-			NamePrefix:  "foobar-",
-			Inventories: []api.Inventory{},
-			Filter: api.Filter{
-				MacPrefix: []string{machineWithIPAddressMACAddressPrefFilter},
-			},
-		}
-		configData, err := yaml.Marshal(data)
-		Expect(err).NotTo(HaveOccurred())
-
-		file, err := os.CreateTemp(GinkgoT().TempDir(), configFile)
-		Expect(err).NotTo(HaveOccurred())
-		defer func() {
-			_ = file.Close()
-		}()
-		Expect(os.WriteFile(file.Name(), configData, 0644)).To(Succeed())
-
-		inventory, err = loadConfig(file.Name())
-		Expect(err).NotTo(HaveOccurred())
-
-		stub := dhcpv6ResponseWithIANA(linkLocalIPV6Addr)
-		_, _ = handler6(relayedRequest, stub)
-
-		epList := &metalv1alpha1.EndpointList{}
-		Eventually(ObjectList(epList)).Should(SatisfyAll(
-			HaveField("Items", HaveLen(1)),
-			HaveField("Items", ContainElement(SatisfyAll(
-				HaveField("ObjectMeta.Name", HavePrefix("foobar-")),
-				HaveField("Spec.MACAddress", machineWithIPAddressMACAddress),
-				HaveField("Spec.IP", metalv1alpha1.MustParseIP(linkLocalIPV6Addr.String())),
-			))),
-		))
-
-		endpoint := &metalv1alpha1.Endpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: epList.Items[0].Name,
-			},
-		}
-		DeferCleanup(k8sClient.Delete, endpoint)
-	})
-
-	It("Should not create an endpoint for IPv6 DHCP request when response has no IANA", func(ctx SpecContext) {
-		mac, _ := net.ParseMAC(machineWithIPAddressMACAddress)
-		ip := net.ParseIP(linkLocalIPV6Prefix)
-		linkLocalIPV6Addr, _ := eui64.ParseMAC(ip, mac)
-
-		req, _ := dhcpv6.NewMessage()
-		req.MessageType = dhcpv6.MessageTypeRequest
-		relayedRequest, _ := dhcpv6.EncapsulateRelay(req, dhcpv6.MessageTypeRelayForward, net.IPv6loopback, linkLocalIPV6Addr)
-
-		stub, _ := dhcpv6.NewMessage()
-		stub.MessageType = dhcpv6.MessageTypeReply
-		_, _ = handler6(relayedRequest, stub)
-
-		endpoint := &metalv1alpha1.Endpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: machineWithIPAddressName,
-			},
-		}
-		Eventually(Get(endpoint)).Should(Satisfy(apierrors.IsNotFound))
-	})
-
-	It("Should not create an endpoint for IPv6 DHCP request from a unknown machine", func(ctx SpecContext) {
-		mac, _ := net.ParseMAC(unknownMachineMACAddress)
-		ip := net.ParseIP(linkLocalIPV6Prefix)
-		linkLocalIPV6Addr, _ := eui64.ParseMAC(ip, mac)
-
-		req, _ := dhcpv6.NewMessage()
-		req.MessageType = dhcpv6.MessageTypeRequest
-		relayedRequest, _ := dhcpv6.EncapsulateRelay(req, dhcpv6.MessageTypeRelayForward, net.IPv6loopback, linkLocalIPV6Addr)
-
-		stub := dhcpv6ResponseWithIANA(linkLocalIPV6Addr)
-		_, _ = handler6(relayedRequest, stub)
-
-		endpoint := &metalv1alpha1.Endpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: machineWithoutIPAddressName,
-			},
-		}
-		Eventually(Get(endpoint)).Should(Satisfy(apierrors.IsNotFound))
-	})
-
-	It("Should create an endpoint for IPv6 DHCP request from a unknown machine, if ClientLinkLayer is set to allowed MAC (RFC6939) ", func(ctx SpecContext) {
-		mac, _ := net.ParseMAC(unknownMachineMACAddress)
-		ip := net.ParseIP(linkLocalIPV6Prefix)
-		linkLocalIPV6Addr, _ := eui64.ParseMAC(ip, mac)
-
-		req, _ := dhcpv6.NewMessage()
-		req.MessageType = dhcpv6.MessageTypeRequest
-		relayedRequest, _ := dhcpv6.EncapsulateRelay(req, dhcpv6.MessageTypeRelayForward, net.IPv6loopback, linkLocalIPV6Addr)
-
-		knownMac, _ := net.ParseMAC(machineWithIPAddressMACAddress)
-		relayedRequest.AddOption(dhcpv6.OptClientLinkLayerAddress(iana.HWTypeEthernet, knownMac))
-
-		knownLinkLocalIPV6Addr, _ := eui64.ParseMAC(ip, knownMac)
-		stub := dhcpv6ResponseWithIANA(knownLinkLocalIPV6Addr)
-		_, _ = handler6(relayedRequest, stub)
-
-		endpoint := &metalv1alpha1.Endpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: machineWithIPAddressName,
-			},
-		}
-
-		Eventually(Object(endpoint)).Should(SatisfyAll(
-			HaveField("Spec.MACAddress", machineWithIPAddressMACAddress),
-			HaveField("Spec.IP", metalv1alpha1.MustParseIP(knownLinkLocalIPV6Addr.String()))))
-		DeferCleanup(k8sClient.Delete, endpoint)
-	})
-
-	It("Should return and break plugin chain, if getting an IPv6 DHCP request directly (no relay)", func(ctx SpecContext) {
-		req, _ := dhcpv6.NewMessage()
-		req.MessageType = dhcpv6.MessageTypeRequest
-
-		stub, _ := dhcpv6.NewMessage()
-		stub.MessageType = dhcpv6.MessageTypeReply
-		resp, breakChain := handler6(req, stub)
-
-		Eventually(resp).Should(BeNil())
-		Eventually(breakChain).Should(BeTrue())
-	})
-
-	It("Should create an endpoint for IPv4 DHCP request from a known machine with IP address", func(ctx SpecContext) {
-		mac, _ := net.ParseMAC(machineWithIPAddressMACAddress)
-
-		req, _ := dhcpv4.NewDiscovery(mac)
-		stub, _ := dhcpv4.NewReplyFromRequest(req)
-		stub.YourIPAddr = net.ParseIP(privateIPV4Address)
-
-		_, _ = handler4(req, stub)
-
-		endpoint := &metalv1alpha1.Endpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: machineWithIPAddressName,
-			},
-		}
-
-		Eventually(Object(endpoint)).Should(SatisfyAll(
-			HaveField("Spec.MACAddress", machineWithIPAddressMACAddress),
-			HaveField("Spec.IP", metalv1alpha1.MustParseIP(privateIPV4Address))))
-
-		DeferCleanup(k8sClient.Delete, endpoint)
-	})
-
-	It("Should create an endpoint for IPv4 DHCP request from a known MAC prefix with IP address", func(ctx SpecContext) {
-		mac, _ := net.ParseMAC(machineWithIPAddressMACAddress)
-
-		req, _ := dhcpv4.NewDiscovery(mac)
-		stub, _ := dhcpv4.NewReplyFromRequest(req)
-		stub.YourIPAddr = net.ParseIP(privateIPV4Address)
-
-		configFile := inventoryConfigFile
-		data := api.MetalConfig{
-			NamePrefix:  "",
-			Inventories: []api.Inventory{},
-			Filter: api.Filter{
-				MacPrefix: []string{machineWithIPAddressMACAddressPrefFilter},
-			},
-		}
-		configData, err := yaml.Marshal(data)
-		Expect(err).NotTo(HaveOccurred())
-
-		file, err := os.CreateTemp(GinkgoT().TempDir(), configFile)
-		Expect(err).NotTo(HaveOccurred())
-		defer func() {
-			_ = file.Close()
-		}()
-		Expect(os.WriteFile(file.Name(), configData, 0644)).To(Succeed())
-
-		inventory, err = loadConfig(file.Name())
-		Expect(err).NotTo(HaveOccurred())
-
-		_, _ = handler4(req, stub)
-
-		epList := &metalv1alpha1.EndpointList{}
-		Eventually(ObjectList(epList)).Should(SatisfyAll(
-			HaveField("Items", HaveLen(1)),
-			HaveField("Items", ContainElement(SatisfyAll(
-				HaveField("ObjectMeta.Name", HavePrefix(defaultNamePrefix)),
-				HaveField("Spec.MACAddress", machineWithIPAddressMACAddress),
-				HaveField("Spec.IP", metalv1alpha1.MustParseIP(privateIPV4Address)),
-			))),
-		))
-
-		endpoint := &metalv1alpha1.Endpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: epList.Items[0].Name,
-			},
-		}
-		DeferCleanup(k8sClient.Delete, endpoint)
-	})
-
-	It("Should not create an endpoint for IPv4 DHCP request when response has no IP",
-		func(ctx SpecContext) {
-			mac, _ := net.ParseMAC(machineWithIPAddressMACAddress)
-
-			req, _ := dhcpv4.NewDiscovery(mac)
-			stub, _ := dhcpv4.NewReplyFromRequest(req)
-
-			_, _ = handler4(req, stub)
-
-			endpoint := &metalv1alpha1.Endpoint{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: machineWithIPAddressName,
-				},
-			}
-			Eventually(Get(endpoint)).Should(Satisfy(apierrors.IsNotFound))
-		})
-
-	It("Should not create a second endpoint for a repeated IPv4 DHCP request from a known MAC prefix", func(ctx SpecContext) {
-		useDynamicInventory()
-		mac, _ := net.ParseMAC(machineWithIPAddressMACAddress)
-
-		for range 2 {
-			req, _ := dhcpv4.NewDiscovery(mac)
-			stub, _ := dhcpv4.NewReplyFromRequest(req)
-			stub.YourIPAddr = net.ParseIP(privateIPV4Address)
-			_, breakChain := handler4(req, stub)
-			Expect(breakChain).To(BeFalse())
-		}
-
-		epList := &metalv1alpha1.EndpointList{}
-		Eventually(ObjectList(epList)).Should(SatisfyAll(
-			HaveField("Items", HaveLen(1)),
-			HaveField("Items", ContainElement(SatisfyAll(
-				HaveField("Spec.MACAddress", machineWithIPAddressMACAddress),
-				HaveField("Spec.IP", metalv1alpha1.MustParseIP(privateIPV4Address)),
-			))),
-		))
-		DeferCleanup(k8sClient.Delete, &epList.Items[0])
-	})
-
-	It("Should update the endpoint IP address for an IPv4 DHCP request from a known MAC prefix with a new IP address", func(ctx SpecContext) {
-		useDynamicInventory()
-		mac, _ := net.ParseMAC(machineWithIPAddressMACAddress)
-
-		for _, ip := range []string{privateIPV4Address, "192.168.47.12"} {
-			req, _ := dhcpv4.NewDiscovery(mac)
-			stub, _ := dhcpv4.NewReplyFromRequest(req)
-			stub.YourIPAddr = net.ParseIP(ip)
-			_, breakChain := handler4(req, stub)
-			Expect(breakChain).To(BeFalse())
-		}
-
-		epList := &metalv1alpha1.EndpointList{}
-		Eventually(ObjectList(epList)).Should(SatisfyAll(
-			HaveField("Items", HaveLen(1)),
-			HaveField("Items", ContainElement(SatisfyAll(
-				HaveField("Spec.MACAddress", machineWithIPAddressMACAddress),
-				HaveField("Spec.IP", metalv1alpha1.MustParseIP("192.168.47.12")),
-			))),
-		))
-		DeferCleanup(k8sClient.Delete, &epList.Items[0])
-	})
-
-	It("Should not create an endpoint for IPv4 DHCP request from a MAC not matching a known MAC prefix", func(ctx SpecContext) {
-		useDynamicInventory()
-		mac, _ := net.ParseMAC(unknownMachineMACAddress)
-
-		req, _ := dhcpv4.NewDiscovery(mac)
-		stub, _ := dhcpv4.NewReplyFromRequest(req)
-		stub.YourIPAddr = net.ParseIP(privateIPV4Address)
-		_, breakChain := handler4(req, stub)
-		Expect(breakChain).To(BeFalse())
-
-		epList := &metalv1alpha1.EndpointList{}
-		Eventually(ObjectList(epList)).Should(HaveField("Items", BeEmpty()))
-	})
-
-	It("Should return and break plugin chain, if the MAC address cannot be determined from an IPv6 DHCP request", func(ctx SpecContext) {
-		req, _ := dhcpv6.NewMessage()
-		req.MessageType = dhcpv6.MessageTypeRequest
-		relayedRequest, _ := dhcpv6.EncapsulateRelay(req, dhcpv6.MessageTypeRelayForward, net.IPv6loopback, net.ParseIP("192.0.2.1"))
-
-		stub := dhcpv6ResponseWithIANA(net.ParseIP("2001:db8::1"))
-		resp, breakChain := handler6(relayedRequest, stub)
-		Expect(resp).To(BeNil())
-		Expect(breakChain).To(BeTrue())
-	})
-
-	It("Should not create an endpoint for IPv4 DHCP request from a unknown machine", func(ctx SpecContext) {
-		mac, _ := net.ParseMAC(unknownMachineMACAddress)
-
-		req, _ := dhcpv4.NewDiscovery(mac)
-		stub, _ := dhcpv4.NewReplyFromRequest(req)
-		stub.YourIPAddr = net.ParseIP(privateIPV4Address)
-
-		_, _ = handler4(req, stub)
-
-		endpoint := &metalv1alpha1.Endpoint{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: machineWithIPAddressName,
-			},
-		}
-		Eventually(Get(endpoint)).Should(Satisfy(apierrors.IsNotFound))
-	})
 })
-
-// useDynamicInventory switches the plugin to MAC prefix onboarding (filter only, no static hosts).
-func useDynamicInventory() {
-	data := api.MetalConfig{
-		Filter: api.Filter{
-			MacPrefix: []string{machineWithIPAddressMACAddressPrefFilter},
-		},
-	}
-	configData, err := yaml.Marshal(data)
-	Expect(err).NotTo(HaveOccurred())
-
-	file, err := os.CreateTemp(GinkgoT().TempDir(), inventoryConfigFile)
-	Expect(err).NotTo(HaveOccurred())
-	defer func() {
-		_ = file.Close()
-	}()
-	Expect(os.WriteFile(file.Name(), configData, 0644)).To(Succeed())
-
-	inventory, err = loadConfig(file.Name())
-	Expect(err).NotTo(HaveOccurred())
-	Expect(inventory.Strategy).To(Equal(OnboardingStrategyDynamic))
-}

@@ -16,6 +16,7 @@ import (
 	"github.com/ironcore-dev/controller-utils/modutils"
 	"github.com/ironcore-dev/fedhcp/internal/api"
 	"github.com/ironcore-dev/fedhcp/internal/kubernetes"
+	"github.com/ironcore-dev/fedhcp/internal/macdb"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -46,6 +47,15 @@ const (
 	linkLocalIPV6Prefix                      = "fe80::"
 	privateIPV4Address                       = "192.168.47.11"
 	inventoryConfigFile                      = "config.yaml"
+
+	// MAC database entry matching machineWithIPAddressMACAddress and the prefix filter.
+	bmcMACPrefix   = "112233"
+	bmcProtocol    = "Redfish"
+	bmcPort        = 443
+	bmcUsername    = "admin"
+	bmcPassword    = "secret"
+	bmcConsoleType = "SSH"
+	bmcConsolePort = 22
 )
 
 var (
@@ -118,34 +128,15 @@ func SetupTest() *corev1.Namespace {
 		Expect(k8sClient.Create(ctx, ns)).To(Succeed(), "failed to create test namespace")
 		DeferCleanup(k8sClient.Delete, ns)
 
-		configFile := inventoryConfigFile
-		data := api.MetalConfig{
+		var err error
+		inventory, err = loadConfig(writeMetalConfig(api.MetalConfig{
 			NamePrefix: "server-",
 			Inventories: []api.Inventory{
-				{
-					Name:       machineWithIPAddressName,
-					MacAddress: machineWithIPAddressMACAddress,
-				},
-				{
-					Name:       machineWithoutIPAddressName,
-					MacAddress: machineWithoutIPAddressMACAddress,
-				},
+				{Name: machineWithIPAddressName, MacAddress: machineWithIPAddressMACAddress},
+				{Name: machineWithoutIPAddressName, MacAddress: machineWithoutIPAddressMACAddress},
 			},
-			Filter: api.Filter{
-				MacPrefix: []string{machineWithIPAddressMACAddressPrefFilter},
-			},
-		}
-		configData, err := yaml.Marshal(data)
-		Expect(err).NotTo(HaveOccurred())
-
-		file, err := os.CreateTemp(GinkgoT().TempDir(), configFile)
-		Expect(err).NotTo(HaveOccurred())
-		defer func() {
-			_ = file.Close()
-		}()
-		Expect(os.WriteFile(file.Name(), configData, 0644)).To(Succeed())
-
-		inventory, err = loadConfig(file.Name())
+			Filter: api.Filter{MacPrefix: []string{machineWithIPAddressMACAddressPrefFilter}},
+		}))
 		Expect(err).NotTo(HaveOccurred())
 		Expect(inventory.Entries).To(HaveKeyWithValue(machineWithIPAddressMACAddress, machineWithIPAddressName))
 		Expect(inventory.Entries).To(HaveKeyWithValue(machineWithoutIPAddressMACAddress, machineWithoutIPAddressName))
@@ -153,4 +144,41 @@ func SetupTest() *corev1.Namespace {
 	})
 
 	return ns
+}
+
+// writeMACDB writes a MAC prefix database with a single BMC entry matching
+// machineWithIPAddressMACAddress (and the prefix filter) and returns its path.
+func writeMACDB() string {
+	db := macdb.MacPrefixes{MacPrefixes: []macdb.MacPrefix{{
+		MacPrefix:    bmcMACPrefix,
+		Manufacturer: "Test",
+		Protocol:     bmcProtocol,
+		Port:         bmcPort,
+		Type:         macdb.BMCType,
+		DefaultCredentials: []macdb.Credential{
+			{Username: bmcUsername, Password: bmcPassword},
+		},
+		Console: macdb.Console{Type: bmcConsoleType, Port: bmcConsolePort},
+	}}}
+	data, err := yaml.Marshal(db)
+	Expect(err).NotTo(HaveOccurred())
+	path := filepath.Join(GinkgoT().TempDir(), "macdb.yaml")
+	Expect(os.WriteFile(path, data, 0644)).To(Succeed())
+	return path
+}
+
+// writeMetalConfig marshals a metal config to a file and returns its path. The
+// MAC database path and default protocol scheme are filled in when unset.
+func writeMetalConfig(data api.MetalConfig) string {
+	if data.MACDB == "" {
+		data.MACDB = writeMACDB()
+	}
+	if data.DefaultProtocolScheme == "" {
+		data.DefaultProtocolScheme = "https"
+	}
+	configData, err := yaml.Marshal(data)
+	Expect(err).NotTo(HaveOccurred())
+	path := filepath.Join(GinkgoT().TempDir(), inventoryConfigFile)
+	Expect(os.WriteFile(path, configData, 0644)).To(Succeed())
+	return path
 }

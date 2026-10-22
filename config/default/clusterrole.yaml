@@ -32,9 +32,16 @@ rules:
 - apiGroups:
     - metal.ironcore.dev
   resources:
-    - endpoints
+    - bmcs
   verbs:
-    - '*'
+    - 'list'
+    - 'create'
+- apiGroups:
+    - metal.ironcore.dev
+  resources:
+    - bmcsecrets
+  verbs:
+    - 'create'
 - apiGroups:
     - fedhcp.ironcore.dev
   resources:

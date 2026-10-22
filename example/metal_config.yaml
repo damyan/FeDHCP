@@ -1,3 +1,11 @@
+# Path to the MAC prefix database (same format as the metal-operator
+# --mac-prefixes-file). Required: it supplies the BMC protocol, port, console
+# and default credentials for a matching MAC prefix.
+macDB: /etc/fedhcp/macdb.yaml
+# Fills BMC spec.protocol.scheme when the matching MAC database entry leaves it
+# empty.
+defaultProtocolScheme: https
+
 hosts:
     - name: server-01
       macAddress: 00:1A:2B:3C:4D:5E

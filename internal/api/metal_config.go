@@ -16,4 +16,11 @@ type MetalConfig struct {
 	NamePrefix  string      `yaml:"namePrefix"`
 	Inventories []Inventory `yaml:"hosts"`
 	Filter      Filter      `yaml:"filter"`
+
+	// MACDB is the path to the MAC prefix database file (required). It supplies the
+	// BMC protocol, port, console and default credentials for a matching MAC prefix.
+	MACDB string `yaml:"macDB"`
+	// DefaultProtocolScheme fills BMC spec.protocol.scheme when the matching MAC
+	// database entry leaves it empty (e.g. "https").
+	DefaultProtocolScheme string `yaml:"defaultProtocolScheme"`
 }

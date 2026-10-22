@@ -156,13 +156,17 @@ leaseTimes:
 - depends on [IPAM operator](https://github.com/ironcore-dev/ipam)
  
 ## Metal
-The Metal plugin acts as a connection link between DHCP and the IronCore metal stack. It creates an `EndPoint` object for each machine with leased IP address. Those endpoints are then consumed by the metal operator, who then creates the corresponding `Machine` objects.
+The Metal plugin acts as a connection link between DHCP and the IronCore metal stack. For each machine with a leased IP address it creates a `BMC` (plus its `BMCSecret`) object. These are then consumed by the metal operator, which creates the corresponding `Server` objects.
 
 The plugin extracts the IP address directly from the DHCP response: for IPv6 from the IANA option, for IPv4 from the `YourIPAddr` field. Therefore, a leasing plugin (e.g. `stateless`, `oob`, `onmetal`) **must** be configured before the `metal` plugin in the handler chain so that the response already contains the leased address.
 
 ### Configuration
-The metal configuration consists of an inventory list. Currently, there are two different ways to provide an inventory list: either by specifying a MAC address filter or by providing the inventory list explicitly. If both a static list and a filter are specified in the `metal_config.yaml`, the static list gets a precedence, so the filter will be ignored. Providing an explicit static inventory list in `metal_config.yaml` goes as follows:
+The metal configuration consists of an inventory list and a MAC prefix database. The MAC prefix database is mandatory and is referenced via `macDB` (same format as the metal operator's `--mac-prefixes-file`). It supplies the BMC protocol, port, console and default credentials for a matching MAC prefix, while `defaultProtocolScheme` fills `BMC spec.protocol.scheme` whenever the matching database entry leaves it empty. A MAC without a matching `bmc` entry in the database is skipped.
+
+There are two ways to provide the inventory list: either by specifying a MAC address filter or by providing the list explicitly. If both a static list and a filter are specified in the `metal_config.yaml`, the static list takes precedence and the filter is ignored. Providing an explicit static inventory list goes as follows:
 ```yaml
+macDB: /etc/fedhcp/macdb.yaml
+defaultProtocolScheme: https # optional, used when the MAC database entry has no scheme
 hosts:
   - name: server-01
     macAddress: 00:1A:2B:3C:4D:5E
@@ -170,9 +174,10 @@ hosts:
     macAddress: 00:1A:2B:3C:4D:5F
 ```
 
-Providing a MAC address prefix filter list creates `Endpoint`s with a predefined prefix name. When the MAC address of an inventory does not match the prefix, the inventory will not be onboarded, so for now no "onboarding by default" occurs. Obviously a full MAC address is a valid prefix filter.
-To get inventories with certain MACs onboarded, the following `metal_config.yaml` shall be specified:
+Providing a MAC address prefix filter list onboards machines with a generated name using a predefined prefix. When the MAC address of a machine does not match any prefix, it is not onboarded, so for now no "onboarding by default" occurs. Obviously a full MAC address is a valid prefix filter.
+To get machines with certain MACs onboarded, the following `metal_config.yaml` shall be specified:
 ```yaml
+macDB: /etc/fedhcp/macdb.yaml
 namePrefix: server- # optional prefix, default: "compute-"
 filter:
   macPrefix:
@@ -180,13 +185,15 @@ filter:
     - 00:1A:2B:3C:4D:5F
     - 00:AA:BB
 ```
-The inventories above will get auto-generated names like `server-aybz`.
+The machines above will get auto-generated names like `server-aybz`.
 
 ### Notes
 - supports both IPv4 and IPv6
 - IPv6 relays are supported, IPv4 are not
 - must be configured after a leasing plugin (e.g. `stateless`, `oob`, `onmetal`) in the handler chain
-- depends on [metal operator](https://github.com/ironcore-dev/metal)
+- depends on [metal operator](https://github.com/ironcore-dev/metal) v0.8.0 or later
+- the BMC's network access is written inline into `BMC.spec.access` (MAC and IP). As `spec.access` is immutable, an already existing `BMC` is never changed: once a `BMC` for a MAC exists, further requests are a no-op and a changed IP is only logged. Applying a new IP requires deleting the `BMC` so that it gets recreated
+- a `BMC` is matched by its MAC address (from `spec.access` or `status.macAddress`), so `BMC`s created by the deprecated `Endpoint` flow (which use `spec.endpointRef`) are recognized too and not duplicated
 
 ## NTP
 The NTP plugin adds NTP server addresses to DHCP responses. For DHCPv4 it sets [Option 42 (NTP Servers)](https://www.rfc-editor.org/rfc/rfc2132#section-8.3), for DHCPv6 it sets [Option 56 (NTP Server)](https://www.rfc-editor.org/rfc/rfc5908).
